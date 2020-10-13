@@ -398,7 +398,7 @@ export class MainThreadSCM implements MainThreadSCMShape {
 			return;
 		}
 
-		repository.input.save();
+		repository.input.setValue(value, false);
 	}
 
 	$setInputBoxPlaceholder(sourceControlHandle: number, placeholder: string): void {
