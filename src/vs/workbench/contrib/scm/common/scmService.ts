@@ -94,7 +94,8 @@ class SCMInput implements ISCMInput {
 		let history = this.storageService.get(key, StorageScope.WORKSPACE, '[]');
 		if (history) {
 			this.historyNavigator = new HistoryNavigator(JSON.parse(history), 50);
-			this.setValue(this.latestTyped(), true);
+			let prev = this.historyNavigator.previous();
+			this.setValue(prev ? prev.value : '', true);
 		} else {
 			this.historyNavigator = new HistoryNavigator<SCMValue>([], 50);
 		}
@@ -138,13 +139,11 @@ class SCMInput implements ISCMInput {
 		if (item.length > 0) {
 			this.historyNavigator.remove(item[0]);
 		}
-		if (this.value) {
-			if (!this.has(this.value)) {
+		if (!this.has(this.value)) {
+			this.historyNavigator.add(new SCMValue(this.value, isCommit));
+		} else if (isCommit && item.length > 0) {
+			if (item[0].value === this.value && !item[0].isCommitMessage) {
 				this.historyNavigator.add(new SCMValue(this.value, isCommit));
-			} else if (isCommit && item.length > 0) {
-				if (item[0].value === this.value && !item[0].isCommitMessage) {
-					this.historyNavigator.add(new SCMValue(this.value, isCommit));
-				}
 			}
 		}
 		this.save();
