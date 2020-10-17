@@ -230,7 +230,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 });
 
 KeybindingsRegistry.registerCommandAndKeybindingRule({
-	id: 'scm.viewNextCommit',
+	id: 'scmInputIsInLastLine',
 	description: { description: localize('scm view next commit', "SCM: View Next Commit"), args: [] },
 	weight: KeybindingWeight.WorkbenchContrib,
 	when: ContextKeyExpr.has('scmRepository'),
@@ -244,7 +244,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 });
 
 KeybindingsRegistry.registerCommandAndKeybindingRule({
-	id: 'scm.viewPriorCommit',
+	id: 'scmInputIsInFirstLine',
 	description: { description: localize('scm view prior commit', "SCM: View Prior Commit"), args: [] },
 	weight: KeybindingWeight.WorkbenchContrib,
 	when: ContextKeyExpr.has('scmRepository'),

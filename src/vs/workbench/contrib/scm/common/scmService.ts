@@ -8,19 +8,8 @@ import { Event, Emitter } from 'vs/base/common/event';
 import { ISCMService, ISCMProvider, ISCMInput, ISCMRepository, IInputValidator } from './scm';
 import { ILogService } from 'vs/platform/log/common/log';
 import { IContextKey, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
-import { IStorageService, StorageScope } from 'vs/platform/storage/common/storage';
+import { IStorageService, StorageScope, WillSaveStateReason } from 'vs/platform/storage/common/storage';
 import { HistoryNavigator } from 'vs/base/common/history';
-
-class SCMValue {
-
-	value: string;
-	isCommitMessage: boolean;
-
-	constructor(value: string, isCommitMessage: boolean) {
-		this.value = value;
-		this.isCommitMessage = isCommitMessage;
-	}
-}
 
 class SCMInput implements ISCMInput {
 
@@ -35,7 +24,7 @@ class SCMInput implements ISCMInput {
 			return;
 		}
 		if (!fromKeyboard) {
-			this.addToHistory(true);
+			this.addToHistory(true, false);
 		}
 		this._value = value;
 		this._onDidChange.fire(value);
@@ -85,7 +74,7 @@ class SCMInput implements ISCMInput {
 	}
 	private readonly _onDidChangeValidateInput = new Emitter<void>();
 	readonly onDidChangeValidateInput: Event<void> = this._onDidChangeValidateInput.event;
-	private historyNavigator: HistoryNavigator<SCMValue>;
+	private historyNavigator: HistoryNavigator<string>;
 	constructor(
 		readonly repository: ISCMRepository,
 		@IStorageService private storageService: IStorageService
@@ -93,68 +82,60 @@ class SCMInput implements ISCMInput {
 		const key = `scm/input:${this.repository.provider.label}:${this.repository.provider.rootUri?.path}`;
 		let history = this.storageService.get(key, StorageScope.WORKSPACE, '[]');
 		if (history) {
-			this.historyNavigator = new HistoryNavigator(JSON.parse(history), 50);
+			this.historyNavigator = new HistoryNavigator<string>(JSON.parse(history), 50);
 			let prev = this.historyNavigator.previous();
-			this.setValue(prev ? prev.value : '', true);
+			this.setValue(prev ? prev : '', true);
 		} else {
-			this.historyNavigator = new HistoryNavigator<SCMValue>([], 50);
+			this.historyNavigator = new HistoryNavigator<string>([], 50);
 		}
-		this.storageService.onWillSaveState(() => {
-			this.addToHistory(false);
+		this.storageService.onWillSaveState((e) => {
+			if (e.reason ===  WillSaveStateReason.SHUTDOWN) {
+				this.addToHistory(false, true);
+			}
 		});
 	}
 
 	showNextValue(): void {
-		if (!this.has(this.value)) {
-			this.addToHistory(false);
+		if (!this.historyNavigator.has(this.value)) {
+			this.addToHistory(false, false);
 		}
 
 		let next = this.historyNavigator.next();
-		if (next) {
-			if (next.value === this.value) {
-				next = this.historyNavigator.next();
-			}
+
+		if (next === this.value) {
+			next = this.historyNavigator.next();
 		}
 
-		if (next) {
-			this.setValue(next.value, true);
+		if (next !== null) {
+			this.setValue(next, true);
 		}
 	}
 
 	showPreviousValue(): void {
-		if (!this.has(this.value)) {
-			this.addToHistory(false);
+		if (!this.historyNavigator.has(this.value)) {
+			this.addToHistory(false, false);
 		}
 
 		let previous = this.historyNavigator.previous();
-		if (previous) {
-			if (previous.value === this.value) {
-				previous = this.historyNavigator.previous();
-			}
+
+		if (previous === this.value) {
+			previous = this.historyNavigator.previous();
 		}
 
-		if (previous) {
-			this.setValue(previous.value, true);
+		if (previous !== null) {
+			this.setValue(previous, true);
 		}
 	}
 
-	private has(value: string): boolean {
-		let values = this.historyNavigator.getHistory();
-		let filtered = values.filter(item => item.value === value);
-		return filtered.length > 0;
-	}
-
-	private addToHistory(isCommit: boolean): void {
-		let item = this.historyNavigator.getHistory().filter(item => !item.isCommitMessage);
-		if (!isCommit && item.length > 0) {
-			this.historyNavigator.remove(item[0]);
+	private addToHistory(isCommit: boolean, isWindowReload: boolean): void {
+		let latestInput = this.historyNavigator.last();
+		if (!isCommit && !isWindowReload && latestInput !== null) {
+			this.historyNavigator.remove(latestInput);
 		}
-		if (!this.has(this.value)) {
-			this.historyNavigator.add(new SCMValue(this.value, isCommit));
-		} else if (isCommit && item.length > 0) {
-			if (item[0].value === this.value && !item[0].isCommitMessage) {
-				this.historyNavigator.add(new SCMValue(this.value, isCommit));
-			}
+		if (!this.historyNavigator.has(this.value)) {
+			this.historyNavigator.add(this.value);
+		} else if (isCommit && latestInput && latestInput === this.value) {
+			this.historyNavigator.add(this.value);
 		}
 		this.save();
 	}
