@@ -110,6 +110,11 @@ class SCMInput implements ISCMInput {
 		}
 
 		let next = this.historyNavigator.next();
+		if (next) {
+			if (next.value === this.value) {
+				next = this.historyNavigator.next();
+			}
+		}
 
 		if (next) {
 			this.setValue(next.value, true);
@@ -122,6 +127,11 @@ class SCMInput implements ISCMInput {
 		}
 
 		let previous = this.historyNavigator.previous();
+		if (previous) {
+			if (previous.value === this.value) {
+				previous = this.historyNavigator.previous();
+			}
+		}
 
 		if (previous) {
 			this.setValue(previous.value, true);
@@ -136,7 +146,7 @@ class SCMInput implements ISCMInput {
 
 	private addToHistory(isCommit: boolean): void {
 		let item = this.historyNavigator.getHistory().filter(item => !item.isCommitMessage);
-		if (item.length > 0) {
+		if (!isCommit && item.length > 0) {
 			this.historyNavigator.remove(item[0]);
 		}
 		if (!this.has(this.value)) {
@@ -153,15 +163,6 @@ class SCMInput implements ISCMInput {
 		if (this.repository.provider.rootUri) {
 			const key = `scm/input:${this.repository.provider.label}:${this.repository.provider.rootUri.path}`;
 			this.storageService.store(key, JSON.stringify(this.historyNavigator.getHistory()), StorageScope.WORKSPACE);
-		}
-	}
-
-	private latestTyped() {
-		let current = this.historyNavigator.getHistory().filter(item => !item.isCommitMessage);
-		if (current.length > 0) {
-			return current[0].value;
-		} else {
-			return '';
 		}
 	}
 }
