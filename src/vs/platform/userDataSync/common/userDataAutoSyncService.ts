@@ -6,18 +6,20 @@
 import { Delayer, disposableTimeout, CancelablePromise, createCancelablePromise, timeout } from 'vs/base/common/async';
 import { Event, Emitter } from 'vs/base/common/event';
 import { Disposable, toDisposable, MutableDisposable, IDisposable } from 'vs/base/common/lifecycle';
-import { IUserDataSyncLogService, IUserDataSyncService, IUserDataAutoSyncService, UserDataSyncError, UserDataSyncErrorCode, IUserDataSyncResourceEnablementService, IUserDataSyncStoreService, UserDataAutoSyncError, ISyncTask, IUserDataSyncStoreManagementService } from 'vs/platform/userDataSync/common/userDataSync';
+import { IUserDataSyncLogService, IUserDataSyncService, IUserDataAutoSyncService, UserDataSyncError, UserDataSyncErrorCode, IUserDataSyncResourceEnablementService, IUserDataSyncStoreService, UserDataAutoSyncError, ISyncTask, IUserDataSyncStoreManagementService, IUserDataAutoSyncEnablementService } from 'vs/platform/userDataSync/common/userDataSync';
 import { IUserDataSyncAccountService } from 'vs/platform/userDataSync/common/userDataSyncAccount';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { isPromiseCanceledError } from 'vs/base/common/errors';
 import { CancellationToken } from 'vs/base/common/cancellation';
-import { IStorageService, StorageScope, IWorkspaceStorageChangeEvent } from 'vs/platform/storage/common/storage';
+import { IStorageService, StorageScope, IStorageValueChangeEvent, StorageTarget } from 'vs/platform/storage/common/storage';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { IUserDataSyncMachinesService } from 'vs/platform/userDataSync/common/userDataSyncMachines';
 import { localize } from 'vs/nls';
 import { toLocalISOString } from 'vs/base/common/date';
 import { URI } from 'vs/base/common/uri';
 import { isEqual } from 'vs/base/common/resources';
+import { isWeb } from 'vs/base/common/platform';
+import { IProductService } from 'vs/platform/product/common/productService';
 
 type AutoSyncClassification = {
 	sources: { classification: 'SystemMetaData', purpose: 'FeatureInsight', isMeasurement: true };
@@ -36,19 +38,27 @@ const enablementKey = 'sync.enable';
 const disableMachineEventuallyKey = 'sync.disableMachineEventually';
 const sessionIdKey = 'sync.sessionId';
 const storeUrlKey = 'sync.storeUrl';
+const productQualityKey = 'sync.productQuality';
 
-export class UserDataAutoSyncEnablementService extends Disposable {
+interface _IUserDataAutoSyncEnablementService extends IUserDataAutoSyncEnablementService {
+	canToggleEnablement(): boolean;
+	setEnablement(enabled: boolean): void;
+}
+
+export class UserDataAutoSyncEnablementService extends Disposable implements _IUserDataAutoSyncEnablementService {
+
+	_serviceBrand: any;
 
 	private _onDidChangeEnablement = new Emitter<boolean>();
 	readonly onDidChangeEnablement: Event<boolean> = this._onDidChangeEnablement.event;
 
 	constructor(
-		@IStorageService protected readonly storageService: IStorageService,
+		@IStorageService private readonly storageService: IStorageService,
 		@IEnvironmentService protected readonly environmentService: IEnvironmentService,
-		@IUserDataSyncStoreManagementService protected readonly userDataSyncStoreManagementService: IUserDataSyncStoreManagementService
+		@IUserDataSyncStoreManagementService private readonly userDataSyncStoreManagementService: IUserDataSyncStoreManagementService,
 	) {
 		super();
-		this._register(storageService.onDidChangeStorage(e => this.onDidStorageChange(e)));
+		this._register(storageService.onDidChangeValue(e => this.onDidStorageChange(e)));
 	}
 
 	isEnabled(defaultEnablement?: boolean): boolean {
@@ -65,23 +75,31 @@ export class UserDataAutoSyncEnablementService extends Disposable {
 		return this.userDataSyncStoreManagementService.userDataSyncStore !== undefined && this.environmentService.sync === undefined;
 	}
 
-	protected setEnablement(enabled: boolean): void {
-		this.storageService.store(enablementKey, enabled, StorageScope.GLOBAL);
+	setEnablement(enabled: boolean): void {
+		if (enabled && !this.canToggleEnablement()) {
+			return;
+		}
+		this.storageService.store(enablementKey, enabled, StorageScope.GLOBAL, StorageTarget.MACHINE);
 	}
 
-	private onDidStorageChange(workspaceStorageChangeEvent: IWorkspaceStorageChangeEvent): void {
-		if (workspaceStorageChangeEvent.scope === StorageScope.GLOBAL) {
-			if (enablementKey === workspaceStorageChangeEvent.key) {
-				this._onDidChangeEnablement.fire(this.isEnabled());
-			}
+	private onDidStorageChange(storageChangeEvent: IStorageValueChangeEvent): void {
+		if (storageChangeEvent.scope !== StorageScope.GLOBAL) {
+			return;
+		}
+
+		if (enablementKey === storageChangeEvent.key) {
+			this._onDidChangeEnablement.fire(this.isEnabled());
+			return;
 		}
 	}
 
 }
 
-export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService implements IUserDataAutoSyncService {
+export class UserDataAutoSyncService extends Disposable implements IUserDataAutoSyncService {
 
 	_serviceBrand: any;
+
+	private readonly userDataAutoSyncEnablementService: _IUserDataAutoSyncEnablementService;
 
 	private readonly autoSync = this._register(new MutableDisposable<AutoSync>());
 	private successiveFailures: number = 0;
@@ -98,14 +116,27 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 	}
 	private set syncUrl(syncUrl: URI | undefined) {
 		if (syncUrl) {
-			this.storageService.store(storeUrlKey, syncUrl.toString(), StorageScope.GLOBAL);
+			this.storageService.store(storeUrlKey, syncUrl.toString(), StorageScope.GLOBAL, StorageTarget.MACHINE);
 		} else {
 			this.storageService.remove(storeUrlKey, StorageScope.GLOBAL);
 		}
 	}
 
+	private previousProductQuality: string | undefined;
+	private get productQuality(): string | undefined {
+		return this.storageService.get(productQualityKey, StorageScope.GLOBAL);
+	}
+	private set productQuality(productQuality: string | undefined) {
+		if (productQuality) {
+			this.storageService.store(productQualityKey, productQuality, StorageScope.GLOBAL, StorageTarget.MACHINE);
+		} else {
+			this.storageService.remove(productQualityKey, StorageScope.GLOBAL);
+		}
+	}
+
 	constructor(
-		@IUserDataSyncStoreManagementService userDataSyncStoreManagementService: IUserDataSyncStoreManagementService,
+		@IProductService productService: IProductService,
+		@IUserDataSyncStoreManagementService private readonly userDataSyncStoreManagementService: IUserDataSyncStoreManagementService,
 		@IUserDataSyncStoreService private readonly userDataSyncStoreService: IUserDataSyncStoreService,
 		@IUserDataSyncResourceEnablementService private readonly userDataSyncResourceEnablementService: IUserDataSyncResourceEnablementService,
 		@IUserDataSyncService private readonly userDataSyncService: IUserDataSyncService,
@@ -113,14 +144,18 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 		@IUserDataSyncAccountService private readonly userDataSyncAccountService: IUserDataSyncAccountService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
 		@IUserDataSyncMachinesService private readonly userDataSyncMachinesService: IUserDataSyncMachinesService,
-		@IStorageService storageService: IStorageService,
-		@IEnvironmentService environmentService: IEnvironmentService
+		@IStorageService private readonly storageService: IStorageService,
+		@IUserDataAutoSyncEnablementService userDataAutoSyncEnablementService: IUserDataAutoSyncEnablementService
 	) {
-		super(storageService, environmentService, userDataSyncStoreManagementService);
+		super();
+		this.userDataAutoSyncEnablementService = userDataAutoSyncEnablementService as _IUserDataAutoSyncEnablementService;
 		this.syncTriggerDelayer = this._register(new Delayer<void>(0));
 
 		this.lastSyncUrl = this.syncUrl;
 		this.syncUrl = userDataSyncStoreManagementService.userDataSyncStore?.url;
+
+		this.previousProductQuality = this.productQuality;
+		this.productQuality = productService.quality;
 
 		if (this.syncUrl) {
 
@@ -135,7 +170,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 				}
 			}));
 
-			if (this.isEnabled()) {
+			if (this.userDataAutoSyncEnablementService.isEnabled()) {
 				this.logService.info('Auto Sync is enabled.');
 			} else {
 				this.logService.info('Auto Sync is disabled.');
@@ -150,6 +185,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 			this._register(userDataSyncStoreService.onDidChangeDonotMakeRequestsUntil(() => this.updateAutoSync()));
 			this._register(Event.debounce<string, string[]>(userDataSyncService.onDidChangeLocal, (last, source) => last ? [...last, source] : [source], 1000)(sources => this.triggerSync(sources, false, false)));
 			this._register(Event.filter(this.userDataSyncResourceEnablementService.onDidChangeResourceEnablement, ([, enabled]) => enabled)(() => this.triggerSync(['resourceEnablement'], false, false)));
+			this._register(this.userDataSyncStoreManagementService.onDidChangeUserDataSyncStore(() => this.triggerSync(['userDataSyncStoreChanged'], false, false)));
 		}
 	}
 
@@ -174,7 +210,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 			}
 
 			/* log message when auto sync is not disabled by user */
-			else if (message && this.isEnabled()) {
+			else if (message && this.userDataAutoSyncEnablementService.isEnabled()) {
 				this.logService.info(message);
 			}
 		}
@@ -184,7 +220,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 	protected startAutoSync(): boolean { return true; }
 
 	private isAutoSyncEnabled(): { enabled: boolean, message?: string } {
-		if (!this.isEnabled()) {
+		if (!this.userDataAutoSyncEnablementService.isEnabled()) {
 			return { enabled: false, message: 'Auto Sync: Disabled.' };
 		}
 		if (!this.userDataSyncAccountService.account) {
@@ -234,11 +270,15 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 	}
 
 	private updateEnablement(enabled: boolean): void {
-		if (this.isEnabled() !== enabled) {
+		if (this.userDataAutoSyncEnablementService.isEnabled() !== enabled) {
 			this.telemetryService.publicLog2<{ enabled: boolean }, AutoSyncEnablementClassification>(enablementKey, { enabled });
-			this.setEnablement(enabled);
+			this.userDataAutoSyncEnablementService.setEnablement(enabled);
 			this.updateAutoSync();
 		}
+	}
+
+	private hasProductQualityChanged(): boolean {
+		return !!this.previousProductQuality && !!this.productQuality && this.previousProductQuality !== this.productQuality;
 	}
 
 	private async onDidFinishSync(error: Error | undefined): Promise<void> {
@@ -298,9 +338,22 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 
 		// Service changed
 		else if (userDataSyncError.code === UserDataSyncErrorCode.ServiceChanged || userDataSyncError.code === UserDataSyncErrorCode.DefaultServiceChanged) {
-			await this.turnOff(false, true /* force soft turnoff on error */, true /* do not disable machine */);
-			await this.turnOn();
-			this.logService.info('Auto Sync: Sync Service changed. Turned off auto sync, reset local state and turned on auto sync.');
+
+			// Check if default settings sync service has changed in web without changing the product quality
+			// Then turn off settings sync and ask user to turn on again
+			if (isWeb && userDataSyncError.code === UserDataSyncErrorCode.DefaultServiceChanged && !this.hasProductQualityChanged()) {
+				await this.turnOff(false, true /* force soft turnoff on error */);
+				this.logService.info('Auto Sync: Turned off sync because default sync service is changed.');
+			}
+
+			// Service has changed by the user. So turn off and turn on sync.
+			// Show a prompt to the user about service change.
+			else {
+				await this.turnOff(false, true /* force soft turnoff on error */, true /* do not disable machine */);
+				await this.turnOn();
+				this.logService.info('Auto Sync: Sync Service changed. Turned off auto sync, reset local state and turned on auto sync.');
+			}
+
 		}
 
 		else {
@@ -312,7 +365,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 	}
 
 	private async disableMachineEventually(): Promise<void> {
-		this.storageService.store(disableMachineEventuallyKey, true, StorageScope.GLOBAL);
+		this.storageService.store(disableMachineEventuallyKey, true, StorageScope.GLOBAL, StorageTarget.MACHINE);
 		await timeout(1000 * 60 * 10);
 
 		// Return if got stopped meanwhile.
@@ -323,7 +376,7 @@ export class UserDataAutoSyncService extends UserDataAutoSyncEnablementService i
 		this.stopDisableMachineEventually();
 
 		// disable only if sync is disabled
-		if (!this.isEnabled() && this.userDataSyncAccountService.account) {
+		if (!this.userDataAutoSyncEnablementService.isEnabled() && this.userDataSyncAccountService.account) {
 			await this.userDataSyncMachinesService.removeCurrentMachine();
 		}
 	}
@@ -513,7 +566,7 @@ class AutoSync extends Disposable {
 
 			// Update local session id
 			if (manifest && manifest.session !== sessionId) {
-				this.storageService.store(sessionIdKey, manifest.session, StorageScope.GLOBAL);
+				this.storageService.store(sessionIdKey, manifest.session, StorageScope.GLOBAL, StorageTarget.MACHINE);
 			}
 
 			// Return if cancellation is requested

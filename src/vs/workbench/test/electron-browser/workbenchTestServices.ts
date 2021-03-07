@@ -5,13 +5,13 @@
 
 import { workbenchInstantiationService as browserWorkbenchInstantiationService, ITestInstantiationService, TestLifecycleService, TestFilesConfigurationService, TestFileService, TestFileDialogService, TestPathService, TestEncodingOracle, TestProductService } from 'vs/workbench/test/browser/workbenchTestServices';
 import { Event } from 'vs/base/common/event';
-import { ISharedProcessService } from 'vs/platform/ipc/electron-browser/sharedProcessService';
+import { ISharedProcessService } from 'vs/platform/ipc/electron-sandbox/services';
 import { NativeWorkbenchEnvironmentService } from 'vs/workbench/services/environment/electron-browser/environmentService';
 import { NativeTextFileService, } from 'vs/workbench/services/textfile/electron-browser/nativeTextFileService';
 import { INativeHostService } from 'vs/platform/native/electron-sandbox/native';
 import { FileOperationError, IFileService } from 'vs/platform/files/common/files';
 import { IUntitledTextEditorService } from 'vs/workbench/services/untitled/common/untitledTextEditorService';
-import { ILifecycleService } from 'vs/platform/lifecycle/common/lifecycle';
+import { ILifecycleService } from 'vs/workbench/services/lifecycle/common/lifecycle';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { IModelService } from 'vs/editor/common/services/modelService';
 import { INativeWorkbenchConfiguration, INativeWorkbenchEnvironmentService } from 'vs/workbench/services/environment/electron-sandbox/environmentService';
@@ -40,7 +40,9 @@ import { IUriIdentityService } from 'vs/workbench/services/uriIdentity/common/ur
 import { MouseInputEvent } from 'vs/base/parts/sandbox/common/electronTypes';
 import { IModeService } from 'vs/editor/common/services/modeService';
 import { IOSProperties, IOSStatistics } from 'vs/platform/native/common/native';
-import { homedir } from 'os';
+import { homedir, release } from 'os';
+import { IEnvironmentService, INativeEnvironmentService } from 'vs/platform/environment/common/environment';
+import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
 
 export const TestWorkbenchConfiguration: INativeWorkbenchConfiguration = {
 	windowId: 0,
@@ -52,8 +54,9 @@ export const TestWorkbenchConfiguration: INativeWorkbenchConfiguration = {
 	appRoot: '',
 	userEnv: {},
 	execPath: process.execPath,
-	perfEntries: [],
+	perfMarks: [],
 	colorScheme: { dark: true, highContrast: false },
+	os: { release: release() },
 	...parseArgs(process.argv, OPTIONS)
 };
 
@@ -76,7 +79,7 @@ export class TestTextFileService extends NativeTextFileService {
 		@IFilesConfigurationService filesConfigurationService: IFilesConfigurationService,
 		@ITextModelService textModelService: ITextModelService,
 		@ICodeEditorService codeEditorService: ICodeEditorService,
-		@IPathService athService: IPathService,
+		@IPathService pathService: IPathService,
 		@IWorkingCopyFileService workingCopyFileService: IWorkingCopyFileService,
 		@ILogService logService: ILogService,
 		@IUriIdentityService uriIdentityService: IUriIdentityService,
@@ -96,11 +99,12 @@ export class TestTextFileService extends NativeTextFileService {
 			filesConfigurationService,
 			textModelService,
 			codeEditorService,
-			athService,
+			pathService,
 			workingCopyFileService,
 			uriIdentityService,
 			modeService,
-			nativeHostService
+			nativeHostService,
+			logService
 		);
 	}
 
@@ -149,9 +153,6 @@ export class TestSharedProcessService implements ISharedProcessService {
 	getChannel(channelName: string): any { return undefined; }
 
 	registerChannel(channelName: string, channel: any): void { }
-
-	async toggleSharedProcessWindow(): Promise<void> { }
-	async whenSharedProcessReady(): Promise<void> { }
 }
 
 export class TestNativeHostService implements INativeHostService {
@@ -168,6 +169,7 @@ export class TestNativeHostService implements INativeHostService {
 	onDidResumeOS: Event<unknown> = Event.None;
 	onDidChangeColorScheme = Event.None;
 	onDidChangePassword = Event.None;
+	onDidChangeDisplay = Event.None;
 
 	windowCount = Promise.resolve(1);
 	getWindowCount(): Promise<number> { return this.windowCount; }
@@ -223,6 +225,7 @@ export class TestNativeHostService implements INativeHostService {
 	async exit(code: number): Promise<void> { }
 	async openDevTools(options?: Electron.OpenDevToolsOptions | undefined): Promise<void> { }
 	async toggleDevTools(): Promise<void> { }
+	async toggleSharedProcessWindow(): Promise<void> { }
 	async resolveProxy(url: string): Promise<string | undefined> { return undefined; }
 	async readClipboardText(type?: 'selection' | 'clipboard' | undefined): Promise<string> { return ''; }
 	async writeClipboardText(text: string, type?: 'selection' | 'clipboard' | undefined): Promise<void> { }
@@ -247,6 +250,9 @@ export function workbenchInstantiationService(): ITestInstantiationService {
 	});
 
 	instantiationService.stub(INativeHostService, new TestNativeHostService());
+	instantiationService.stub(IEnvironmentService, TestEnvironmentService);
+	instantiationService.stub(INativeEnvironmentService, TestEnvironmentService);
+	instantiationService.stub(IWorkbenchEnvironmentService, TestEnvironmentService);
 	instantiationService.stub(INativeWorkbenchEnvironmentService, TestEnvironmentService);
 
 	return instantiationService;

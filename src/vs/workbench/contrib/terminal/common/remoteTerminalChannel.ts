@@ -7,17 +7,20 @@ import { Event } from 'vs/base/common/event';
 import { withNullAsUndefined } from 'vs/base/common/types';
 import { URI, UriComponents } from 'vs/base/common/uri';
 import { IChannel } from 'vs/base/parts/ipc/common/ipc';
-import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IWorkbenchConfigurationService } from 'vs/workbench/services/configuration/common/configuration';
 import { ILogService } from 'vs/platform/log/common/log';
 import { IRemoteAuthorityResolverService } from 'vs/platform/remote/common/remoteAuthorityResolver';
 import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
-import { IEnvironmentVariableService, ISerializableEnvironmentVariableCollection } from 'vs/workbench/contrib/terminal/common/environmentVariable';
 import { serializeEnvironmentVariableCollection } from 'vs/workbench/contrib/terminal/common/environmentVariableShared';
-import { ITerminalConfiguration, ITerminalEnvironment, ITerminalLaunchError, TERMINAL_CONFIG_SECTION } from 'vs/workbench/contrib/terminal/common/terminal';
 import { IConfigurationResolverService } from 'vs/workbench/services/configurationResolver/common/configurationResolver';
 import { SideBySideEditor, EditorResourceAccessor } from 'vs/workbench/common/editor';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { Schemas } from 'vs/base/common/network';
+import { ILabelService } from 'vs/platform/label/common/label';
+import { IEnvironmentVariableService, ISerializableEnvironmentVariableCollection } from 'vs/workbench/contrib/terminal/common/environmentVariable';
+import { IRawTerminalTabLayoutInfo, ITerminalEnvironment, ITerminalLaunchError, ITerminalsLayoutInfo, ITerminalsLayoutInfoById } from 'vs/platform/terminal/common/terminal';
+import { ITerminalConfiguration, TERMINAL_CONFIG_SECTION } from 'vs/workbench/contrib/terminal/common/terminal';
+import { IGetTerminalLayoutInfoArgs, ISetTerminalLayoutInfoArgs } from 'vs/platform/terminal/common/terminalProcess';
 
 export const REMOTE_TERMINAL_CHANNEL_NAME = 'remoteterminal';
 
@@ -67,9 +70,12 @@ export interface ICreateTerminalProcessArguments {
 	resolvedVariables: { [name: string]: string; };
 	envVariableCollections: ITerminalEnvironmentVariableCollections;
 	shellLaunchConfig: IShellLaunchConfigDto;
+	workspaceId: string;
+	workspaceName: string;
 	workspaceFolders: IWorkspaceFolderData[];
 	activeWorkspaceFolder: IWorkspaceFolderData | null;
 	activeFileResource: UriComponents | undefined;
+	shouldPersistTerminal: boolean;
 	cols: number;
 	rows: number;
 	isWorkspaceShellAllowed: boolean;
@@ -116,6 +122,35 @@ export interface ISendCommandResultToTerminalProcessArguments {
 	payload: any;
 }
 
+export interface IOrphanQuestionReplyArgs {
+	id: number;
+}
+
+export interface IListTerminalsArgs {
+	isInitialization: boolean;
+}
+
+export interface IRemoteTerminalDescriptionDto {
+	id: number;
+	pid: number;
+	title: string;
+	cwd: string;
+	workspaceId: string;
+	workspaceName: string;
+	isOrphan: boolean;
+}
+
+export type ITerminalTabLayoutInfoDto = IRawTerminalTabLayoutInfo<IRemoteTerminalDescriptionDto>;
+
+export interface ITriggerTerminalDataReplayArguments {
+	id: number;
+}
+
+export interface ISendCharCountToTerminalProcessArguments {
+	id: number;
+	charCount: number;
+}
+
 export interface IRemoteTerminalProcessReadyEvent {
 	type: 'ready';
 	pid: number;
@@ -126,11 +161,16 @@ export interface IRemoteTerminalProcessTitleChangedEvent {
 	title: string;
 }
 export interface IRemoteTerminalProcessDataEvent {
-	type: 'data'
+	type: 'data';
 	data: string;
 }
+export interface ReplayEntry { cols: number; rows: number; data: string; }
+export interface IRemoteTerminalProcessReplayEvent {
+	type: 'replay';
+	events: ReplayEntry[];
+}
 export interface IRemoteTerminalProcessExitEvent {
-	type: 'exit'
+	type: 'exit';
 	exitCode: number | undefined;
 }
 export interface IRemoteTerminalProcessExecCommandEvent {
@@ -139,12 +179,17 @@ export interface IRemoteTerminalProcessExecCommandEvent {
 	commandId: string;
 	commandArgs: any[];
 }
+export interface IRemoteTerminalProcessOrphanQuestionEvent {
+	type: 'orphan?';
+}
 export type IRemoteTerminalProcessEvent = (
 	IRemoteTerminalProcessReadyEvent
 	| IRemoteTerminalProcessTitleChangedEvent
 	| IRemoteTerminalProcessDataEvent
+	| IRemoteTerminalProcessReplayEvent
 	| IRemoteTerminalProcessExitEvent
 	| IRemoteTerminalProcessExecCommandEvent
+	| IRemoteTerminalProcessOrphanQuestionEvent
 );
 
 export interface IOnTerminalProcessEventArguments {
@@ -156,17 +201,17 @@ export class RemoteTerminalChannelClient {
 	constructor(
 		private readonly _remoteAuthority: string,
 		private readonly _channel: IChannel,
-		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IWorkbenchConfigurationService private readonly _configurationService: IWorkbenchConfigurationService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
 		@IConfigurationResolverService private readonly _resolverService: IConfigurationResolverService,
 		@IEnvironmentVariableService private readonly _environmentVariableService: IEnvironmentVariableService,
 		@IRemoteAuthorityResolverService private readonly _remoteAuthorityResolverService: IRemoteAuthorityResolverService,
 		@ILogService private readonly _logService: ILogService,
 		@IEditorService private readonly _editorService: IEditorService,
-	) {
-	}
+		@ILabelService private readonly _labelService: ILabelService,
+	) { }
 
-	private _readSingleTemrinalConfiguration<T>(key: string): ISingleTerminalConfiguration<T> {
+	private _readSingleTerminalConfiguration<T>(key: string): ISingleTerminalConfiguration<T> {
 		const result = this._configurationService.inspect<T>(key);
 		return {
 			userValue: result.userValue,
@@ -175,24 +220,27 @@ export class RemoteTerminalChannelClient {
 		};
 	}
 
-	public async createTerminalProcess(shellLaunchConfig: IShellLaunchConfigDto, activeWorkspaceRootUri: URI | undefined, cols: number, rows: number, isWorkspaceShellAllowed: boolean): Promise<ICreateTerminalProcessResult> {
+	public async createTerminalProcess(shellLaunchConfig: IShellLaunchConfigDto, activeWorkspaceRootUri: URI | undefined, shouldPersistTerminal: boolean, cols: number, rows: number, isWorkspaceShellAllowed: boolean): Promise<ICreateTerminalProcessResult> {
+		// Be sure to first wait for the remote configuration
+		await this._configurationService.whenRemoteConfigurationLoaded();
+
 		const terminalConfig = this._configurationService.getValue<ITerminalConfiguration>(TERMINAL_CONFIG_SECTION);
 		const configuration: ICompleteTerminalConfiguration = {
-			'terminal.integrated.automationShell.windows': this._readSingleTemrinalConfiguration('terminal.integrated.automationShell.windows'),
-			'terminal.integrated.automationShell.osx': this._readSingleTemrinalConfiguration('terminal.integrated.automationShell.osx'),
-			'terminal.integrated.automationShell.linux': this._readSingleTemrinalConfiguration('terminal.integrated.automationShell.linux'),
-			'terminal.integrated.shell.windows': this._readSingleTemrinalConfiguration('terminal.integrated.shell.windows'),
-			'terminal.integrated.shell.osx': this._readSingleTemrinalConfiguration('terminal.integrated.shell.osx'),
-			'terminal.integrated.shell.linux': this._readSingleTemrinalConfiguration('terminal.integrated.shell.linux'),
-			'terminal.integrated.shellArgs.windows': this._readSingleTemrinalConfiguration('terminal.integrated.shellArgs.windows'),
-			'terminal.integrated.shellArgs.osx': this._readSingleTemrinalConfiguration('terminal.integrated.shellArgs.osx'),
-			'terminal.integrated.shellArgs.linux': this._readSingleTemrinalConfiguration('terminal.integrated.shellArgs.linux'),
-			'terminal.integrated.env.windows': this._readSingleTemrinalConfiguration('terminal.integrated.env.windows'),
-			'terminal.integrated.env.osx': this._readSingleTemrinalConfiguration('terminal.integrated.env.osx'),
-			'terminal.integrated.env.linux': this._readSingleTemrinalConfiguration('terminal.integrated.env.linux'),
+			'terminal.integrated.automationShell.windows': this._readSingleTerminalConfiguration('terminal.integrated.automationShell.windows'),
+			'terminal.integrated.automationShell.osx': this._readSingleTerminalConfiguration('terminal.integrated.automationShell.osx'),
+			'terminal.integrated.automationShell.linux': this._readSingleTerminalConfiguration('terminal.integrated.automationShell.linux'),
+			'terminal.integrated.shell.windows': this._readSingleTerminalConfiguration('terminal.integrated.shell.windows'),
+			'terminal.integrated.shell.osx': this._readSingleTerminalConfiguration('terminal.integrated.shell.osx'),
+			'terminal.integrated.shell.linux': this._readSingleTerminalConfiguration('terminal.integrated.shell.linux'),
+			'terminal.integrated.shellArgs.windows': this._readSingleTerminalConfiguration('terminal.integrated.shellArgs.windows'),
+			'terminal.integrated.shellArgs.osx': this._readSingleTerminalConfiguration('terminal.integrated.shellArgs.osx'),
+			'terminal.integrated.shellArgs.linux': this._readSingleTerminalConfiguration('terminal.integrated.shellArgs.linux'),
+			'terminal.integrated.env.windows': this._readSingleTerminalConfiguration('terminal.integrated.env.windows'),
+			'terminal.integrated.env.osx': this._readSingleTerminalConfiguration('terminal.integrated.env.osx'),
+			'terminal.integrated.env.linux': this._readSingleTerminalConfiguration('terminal.integrated.env.linux'),
 			'terminal.integrated.inheritEnv': terminalConfig.inheritEnv,
 			'terminal.integrated.cwd': terminalConfig.cwd,
-			'terminal.integrated.detectLocale': terminalConfig.detectLocale,
+			'terminal.integrated.detectLocale': terminalConfig.detectLocale
 		};
 
 		// We will use the resolver service to resolve all the variables in the config / launch config
@@ -224,7 +272,8 @@ export class RemoteTerminalChannelClient {
 		const resolverResult = await this._remoteAuthorityResolverService.resolveAuthority(this._remoteAuthority);
 		const resolverEnv = resolverResult.options && resolverResult.options.extensionHostEnv;
 
-		const workspaceFolders = this._workspaceContextService.getWorkspace().folders;
+		const workspace = this._workspaceContextService.getWorkspace();
+		const workspaceFolders = workspace.folders;
 		const activeWorkspaceFolder = activeWorkspaceRootUri ? this._workspaceContextService.getWorkspaceFolder(activeWorkspaceRootUri) : null;
 
 		const activeFileResource = EditorResourceAccessor.getOriginalUri(this._editorService.activeEditor, {
@@ -237,9 +286,12 @@ export class RemoteTerminalChannelClient {
 			resolvedVariables,
 			envVariableCollections,
 			shellLaunchConfig,
+			workspaceId: workspace.id,
+			workspaceName: this._labelService.getWorkspaceLabel(workspace),
 			workspaceFolders,
 			activeWorkspaceFolder,
 			activeFileResource,
+			shouldPersistTerminal,
 			cols,
 			rows,
 			isWorkspaceShellAllowed,
@@ -267,6 +319,13 @@ export class RemoteTerminalChannelClient {
 			id, data
 		};
 		return this._channel.call<void>('$sendInputToTerminalProcess', args);
+	}
+
+	public sendCharCountToTerminalProcess(id: number, charCount: number): Promise<void> {
+		const args: ISendCharCountToTerminalProcessArguments = {
+			id, charCount
+		};
+		return this._channel.call<void>('$sendCharCountToTerminalProcess', args);
 	}
 
 	public shutdownTerminalProcess(id: number, immediate: boolean): Promise<void> {
@@ -305,5 +364,36 @@ export class RemoteTerminalChannelClient {
 			payload
 		};
 		return this._channel.call<void>('$sendCommandResultToTerminalProcess', args);
+	}
+
+	public orphanQuestionReply(id: number): Promise<void> {
+		const args: IOrphanQuestionReplyArgs = {
+			id
+		};
+		return this._channel.call<void>('$orphanQuestionReply', args);
+	}
+
+	public listTerminals(isInitialization: boolean): Promise<IRemoteTerminalDescriptionDto[]> {
+		const args: IListTerminalsArgs = {
+			isInitialization
+		};
+		return this._channel.call<IRemoteTerminalDescriptionDto[]>('$listTerminals', args);
+	}
+
+	public setTerminalLayoutInfo(layout: ITerminalsLayoutInfoById): Promise<void> {
+		const workspace = this._workspaceContextService.getWorkspace();
+		const args: ISetTerminalLayoutInfoArgs = {
+			workspaceId: workspace.id,
+			tabs: layout.tabs
+		};
+		return this._channel.call<void>('$setTerminalLayoutInfo', args);
+	}
+
+	public getTerminalLayoutInfo(): Promise<ITerminalsLayoutInfo | undefined> {
+		const workspace = this._workspaceContextService.getWorkspace();
+		const args: IGetTerminalLayoutInfoArgs = {
+			workspaceId: workspace.id,
+		};
+		return this._channel.call<ITerminalsLayoutInfo>('$getTerminalLayoutInfo', args);
 	}
 }
